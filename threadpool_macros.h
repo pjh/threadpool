@@ -46,9 +46,10 @@
 	} while(0)
 #define tp_test(f, a...) fprintf(stdout, "TEST: %lu: " f, pthread_self(), ##a)
 
+//	fprintf(stdout, "DEBUG: %lu: %s: " f, pthread_self(), __func__, ##a);
 #ifdef TP_DEBUG
 #define tp_debug(f, a...)  do { \
-	fprintf(stdout, "DEBUG: %lu: %s: " f, pthread_self(), __func__, ##a); \
+	fprintf(stdout, "DEBUG: %llu: %s: " f, (unsigned long long)pthread_self(), __func__, ##a); \
 	fflush(stdout); \
 	} while(0)
 #else

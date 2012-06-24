@@ -3,7 +3,7 @@
  * :noTabs=false:
  */
 
-/* A simple, thread-safe queue module.
+/* A simple queue module. The queue is NOT thread-safe!
  *
  * This interface and implementation was first used for a non-volatile
  * memory project, so some artifacts of this are present in the code.
@@ -36,7 +36,7 @@ void queue_destroy(queue *q);
 
 /* Signature for a function that frees a queue element. Queue elements
  * are just arbitrary pointers. */
-typedef void(queue_element_free)(void *);
+typedef void (queue_element_free)(void *);
 
 /* Adds an element to the end of the queue. This function does not make
  * a copy of the element, so after calling it, the caller must not use

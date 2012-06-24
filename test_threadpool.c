@@ -5,20 +5,13 @@
 
 #include <stdlib.h>
 #include <time.h>
-#include "vector.h"
-#include "vector_macros.h"
-
-#define ELT_SIZE_MIN 2     //at least 2!!
-#define ELT_SIZE_MAX 256
-#define ELT_SIZE_DIFF 8
-#define APPENDS_MIN 2
-#define APPENDS_MAX 8
-#define DELETES_MIN 4
-#define DELETES_MAX 6
-#define LOOPS 1000
+#include "queue.h"
+#include "threadpool.h"
+#include "threadpool_macros.h"
 
 void stress_test()
 {
+#if 0
 	int i, j, ret;
 	unsigned long long idx, count;
 	unsigned long tid;
@@ -96,10 +89,33 @@ void stress_test()
 	/* Free vector: */
 	vector_free_contents(v);
 	vector_free(v);
+#endif
+}
+
+void test_queue(void) {
+	int ret;
+}
+
+void test_threadpool(void) {
+	int ret;
+	threadpool *tp;
+
+	ret = threadpool_create(&tp, 1, true);
+	if (ret != 0) {
+		tp_die("threadpool_create() failed\n");
+	}
+
+
 }
 
 int main(int argc, char *argv[])
 {
+	test_queue();
+
+	test_threadpool();
+
+	return 0;
+#if 0
 	int i, ret;
 	unsigned long long count;
 	unsigned long tid;
@@ -172,4 +188,5 @@ int main(int argc, char *argv[])
 	vector_free(v);
 
 	return 0;
+#endif
 }

@@ -6,81 +6,57 @@
 #ifndef THREADPOOL_H__
 #define THREADPOOL_H__
 
-#if 0
-/* Set to 1 if we should die on index out-of-bounds errors, or 0 if we
- * should just return an error.
- */
-#define VECTOR_DIE_ON_OOB 1
+#include <stdbool.h>
+#include <stdint.h>
 
 /* Opaque handle: */
-struct vector_;
-typedef struct vector_ vector;
+struct threadpool_;
+typedef struct threadpool_ threadpool;
 
-/* Allocates and initializes a vector. The vector should later be freed
- * by passing it to vector_free().
- * Returns: 0 on success, -1 on error. On success, *v will be set to point
- * to the newly-allocated vector.
+/* Allocates and initializes an empty threadpool with num_workers threads
+ * in it. The use_nvm argument indicates whether or not this threadpool will
+ * be stored in non-volatile memory.
+ * Returns: 0 on success, -1 on error. On success, *tp is set to point
+ * to the new threadpool.
  */
-int vector_alloc(vector **v);
+int threadpool_create(threadpool **tp, unsigned int num_workers, bool use_nvm);
 
-/* Returns: the number of elements in the vector.
- * Important: be careful about calling vector_count() directly in the
- * loop-condition of a for/while loop: it will be re-called on every loop!
+/* Destroys the threadpool. If the wait argument is true, then this function
+ * will wait for all worker threads to finish their work before destroying
+ * the thread pool (note that this could be a very long wait, of course). If
+ * wait is false, then the worker threads will be cancelled immediately,
+ * which of course may lead to corruption of the data that they are working
+ * with.
  */
-unsigned long long vector_count(vector *v);
+void threadpool_destroy(threadpool *tp, bool wait);
 
-/* Appends an element to the vector.
- * Note that currently, if the number of appended elements goes over the
- * maximum (2^n - 1, where n is the number of bits in an unsigned long long),
- * then undefined behavior will result (this error case is not checked
- * for).
+/* Function for performing work: takes a generic pointer to an argument
+ * that the function should know what to do with.
+ */
+typedef void (task_function)(void *arg);
+
+/* Adds a task to the thread pool to be performed by a worker thread.
  * Returns: 0 on success, -1 on error.
  */
-int vector_append(vector *v, void *e);
+int threadpool_add_task(threadpool *tp, task_function task_fn, void *arg);
 
-/* Replaces the element at the specified index.
- * Returns: 0 on success, -1 on error. On success, *old_e is set to point
- * to the element that was previously stored in the slot.
+/* Returns: the number of worker threads currently in the thread pool. */
+unsigned int threadpool_get_worker_count(threadpool *tp);
+
+/* Creates another worker thread in the thread pool. 
+ * Returns: the number of workers in the pool, or UINT32_MAX on error.
  */
-int vector_set(vector *v, unsigned long long idx, void *e, void **old_e);
+unsigned int threadpool_add_worker(threadpool *tp);
 
-/* Gets the element at the specified index. If VECTOR64_DIE_ON_OOB is set
- * to true, then the only other error case for this function is if the pointer
- * that is passed to it is NULL, so if you're lazy, then you can skip
- * error-checking this function's return value.
- * Returns: 0 on success, -1 on error. On success, *e is set to point to
- * the gotten element.
+/* Removes a worker thread from the pool. If all threads are currently
+ * performing some work, then the wait argument determines if this function
+ * will wait for a thread to finish, or if it will randomly choose a thread
+ * to cancel. Use wait = false with caution!
+ * Returns: the number of workers in the pool, or UINT32_MAX on error.
  */
-int vector_get(vector *v, unsigned long long idx, void **e);
+unsigned int threadpool_remove_worker(threadpool *tp, bool wait);
 
-/* Removes the element at the specified index, and shifts all of the
- * remaining elements down in the vector. Importantly, the element
- * itself is NOT freed; if e is non-NULL, then *e is set to point to
- * the element, so that the caller can free it.
- * Returns: 0 on success, -1 on error.
- */
-int vector_delete(vector *v, unsigned long long idx, void **e);
-
-/* Calls free() on all non-null pointers that are stored in the vector.
- * It does not remove these pointers from the vector however, so the
- * vector's element count will be unchanged.
- * USE THIS FUNCTION WITH CAUTION: it should probably only be called
- * just before calling vector_free(v).
- */
-void vector_free_contents(vector *v);
-
-/* Frees the vector's array and the vector struct itself. NOTE: if the
- * array contains pointers to other data, the data that is pointed to
- * is NOT freed!
- */
-void vector_free(vector *v);
-
-/* Returns: the size of the vector struct */
-unsigned int vector_struct_size();
-
-#endif
-
-#endif  //THREADPOOL_H
+#endif  //THREADPOOL_H__
 
 /*
  * Editor modelines  -  http://www.wireshark.org/tools/modelines.html

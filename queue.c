@@ -10,9 +10,7 @@
 #include <stdlib.h>
 #include "queue.h"
 #include "threadpool_macros.h"
-#include "../kp_common.h"
 #include "../kp_recovery.h"
-  //unfortunate...
 
 typedef struct _element element;
 struct _element {
@@ -21,53 +19,29 @@ struct _element {
 	element *next;
 };
 
+/* I was originally going to include an internal mutex to serialize concurrent
+ * enqueue and dequeue operations, but I decided against this because for
+ * a thread pool (and presumably other applications), a separate lock would
+ * be needed anyway - the thread pool workers need to check if the queue is
+ * empty and then wait on a condition variable, which requires a mutex
+ * OUTSIDE of the queue.
+ */
+//#define QUEUE_LOCK
+
 struct _queue {
 	element *head;
 	element *tail;
+#ifdef QUEUE_LOCK
 	pthread_mutex_t *lock;
+#endif
 	unsigned int len;
 	bool use_nvm;
 };
 
-#if 0
-struct _queue_elem {
-	sthread_t sth;
-	struct _queue_elem *next;
-};
-typedef struct _queue_elem* queue_elem_t;
-#endif
-
-#if 0
-static queue_elem_t free_list;
-
-#ifdef USE_PTHREADS
-/* We need to lock the free_list, but can't depend on the user
- * having implemented locks. So we use pthread locks when available,
- * and depend on the non-preemptive nature of user threads otherwise.
- */
-static pthread_mutex_t free_list_lock;
-
-#define LOCK_FREE_LIST pthread_mutex_lock(&free_list_lock)
-#define UNLOCK_FREE_LIST pthread_mutex_unlock(&free_list_lock)
-
-#else /* USE_PTHREADS */
-
-#define LOCK_FREE_LIST ((void)0)
-#define UNLOCK_FREE_LIST ((void)0)
-
-#endif /* USE_PTHREADS */
-#endif
-
-#if 0
-struct _queue {
-	queue_elem_t head;
-	queue_elem_t tail;
-	int size;
-};
-#endif
-
 int queue_create(queue **q, bool use_nvm) {
+#ifdef QUEUE_LOCK
 	int ret;
+#endif
 
 	if (!q) {
 		tp_error("got a NULL argument: q=%p\n", q);
@@ -75,7 +49,6 @@ int queue_create(queue **q, bool use_nvm) {
 	}
 	tp_debug("allocating a new queue\n");
 
-	//*q = (queue *)malloc(sizeof(queue));
 	kp_kpalloc((void **)q, sizeof(queue), use_nvm);
 	if (!(*q)) {
 		tp_error("malloc(queue) failed\n");
@@ -87,12 +60,14 @@ int queue_create(queue **q, bool use_nvm) {
 	(*q)->len = 0;
 	(*q)->use_nvm = use_nvm;
 
+#ifdef QUEUE_LOCK
 	ret = kp_mutex_create("queue lock", &((*q)->lock));
 	if (ret != 0) {
 		tp_error("mutex creation failed\n");
 		kp_free((void **)q, use_nvm);
 		return -1;
 	};
+#endif
 
 	tp_debug("allocated new queue, use_nvm = %s\n", use_nvm ? "true" : "false");
 	return 0;
@@ -132,7 +107,9 @@ void queue_destroy(queue *q) {
 	}
 
 	/* Free the queue itself: */
+#ifdef QUEUE_LOCK
 	kp_mutex_destroy("queue lock", &(q->lock));
+#endif
 	kp_free((void **)(&q), q->use_nvm);
 
 	tp_debug("destroyed the queue\n");

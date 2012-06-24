@@ -4,230 +4,454 @@
  */
 
 #include <stdlib.h>
+#include "queue.h"
 #include "threadpool.h"
 #include "threadpool_macros.h"
+#include "../kp_common.h"
+#include "../kp_recovery.h"
 
-#if 0
-#define VECTOR_INIT_SIZE 2
-#define VECTOR_RESIZE_FACTOR 2
-
-struct vector_ {
-	void** data;         //array of void pointers
-	unsigned long long size;   //number of array elements allocated
-	unsigned long long count;  //number of elements in use
+struct threadpool_ {
+	/* One mutex lock is used for all of the condition variables. */
+	queue *task_queue;
+	pthread_mutex_t *lock;
+	pthread_cond_t *task_available;
+	pthread_cond_t *exit_cond;
+	bool worker_exit;
+	unsigned int num_workers;
+	bool use_nvm;
 };
 
-int vector_alloc(vector **v)
-{
-	*v = malloc(sizeof(vector));
-	if (*v == NULL) {
-		v_error("malloc(vector) failed\n");
+typedef struct task_ {
+	task_function *task_fn;
+	void *arg;
+	bool use_nvm;
+} task;
+
+/* Function to free a task struct. In the hopefully uncommon event that this
+ * function is called by queue_destroy() (i.e. the threadpool is destroyed
+ * while there are still tasks left in the queue), then it is possible that
+ * the task's arg will never be freed and cause a memory leak, because the
+ * task_function was never called on the arg. Oh well.
+ */
+void task_free_fn(void *arg) {
+	task *dead_task;
+	if (arg) {
+		dead_task = (task *)arg;
+		kp_free((void **)(&dead_task), dead_task->use_nvm);
+	}
+}
+
+int threadpool_create(threadpool **tp, unsigned int num_workers,
+		bool use_nvm) {
+	int ret;
+	unsigned int i, uret;
+
+	if (!tp) {
+		tp_error("got a NULL argument: tp=%p\n", tp);
+		return -1;
+	}
+	if (num_workers == 0 || num_workers == UINT32_MAX) {
+		tp_error("invalid number of worker threads: %u\n", num_workers);
+		return -1;
+	}
+	tp_debug("creating new thread pool with %u workers\n", num_workers);
+
+	kp_kpalloc((void **)tp, sizeof(threadpool), use_nvm);
+	if (!(*tp)) {
+		tp_error("malloc(threadpool) failed\n");
 		return -1;
 	}
 
-	(*v)->data = NULL;
-	(*v)->size = 0;
-	(*v)->count = 0;
+	ret = queue_create(&((*tp)->task_queue), use_nvm);
+	if (ret != 0) {
+		tp_error("queue_create() returned error=%d\n", ret);
+		goto free_pool;
+	}
+	ret = kp_mutex_create("thread pool mutex", &((*tp)->lock));
+	if (ret != 0) {
+		tp_error("kp_mutex_create() returned error=%d\n", ret);
+		goto free_queue;
+	}
+	ret = kp_cond_create("task_available cond", &((*tp)->task_available));
+	if (ret != 0) {
+		tp_error("kp_cond_create(task_available) returned error=%d\n", ret);
+		goto free_mutex;
+	}
+	ret = kp_cond_create("exit cond", &((*tp)->exit_cond));
+	if (ret != 0) {
+		tp_error("kp_cond_create(exit_cond) returned error=%d\n", ret);
+		goto free_cond1;
+	}
+	(*tp)->worker_exit = false;
+	(*tp)->use_nvm = use_nvm;
 
-	v_debug("successfully allocated new vector\n");
+	/* Now that allocation is done, add the workers: */
+	for (i = 0; i < num_workers; i++) {
+		uret = threadpool_add_worker(*tp);
+		if (uret != i+1) {
+			tp_error("threadpool_add_worker(%u) returned unexpected value "
+					"%u\n", i, uret);
+			for (i--; i >= 0; i--) {
+				/* Don't wait, ignore return value: */
+				threadpool_remove_worker(*tp, false);
+			}
+			goto free_cond2;
+		}
+	}
+	(*tp)->num_workers = num_workers;
+
+	tp_debug("successfully created new thread pool with %u threads\n",
+			(*tp)->num_workers);
 	return 0;
+
+free_cond2:
+	kp_cond_destroy("exit cond", &((*tp)->exit_cond));
+free_cond1:
+	kp_cond_destroy("task_available cond", &((*tp)->task_available));
+free_mutex:
+	kp_mutex_destroy("thread pool mutex", &((*tp)->lock));
+free_queue:
+	queue_destroy((*tp)->task_queue);
+free_pool:
+	kp_free((void **)tp, use_nvm);
+	return -1;
 }
 
-unsigned long long vector_count(vector *v)
-{
-	if (v == NULL) {
-		v_error("v is NULL\n");
-		return -1;  //vector_count isn't supposed to return an error, oh well
+void threadpool_destroy(threadpool *tp, bool wait) {
+	unsigned int uret;
+
+	if (!tp) {
+		tp_error("got a NULL argument: tp=%p\n", tp);
+		return;
 	}
-	v_debug("returning count=%llu (size=%llu)\n", v->count, v->size);
-	return v->count;
-}
+	tp_debug("destroying thread pool; wait=%s, thread pool currently has "
+			"%u workers\n", wait ? "true" : "false", tp->num_workers);
 
-int vector_append(vector *v, void *e)
-{
-	if (v == NULL) {
-		v_error("v is NULL\n");
-		return -1;
-	}
-	//TODO: should check if vector has hit max size here!
-
-	if (v->size == 0) {
-		v->size = VECTOR_INIT_SIZE;
-		v->data = malloc(sizeof(void*) * v->size);
-		if (v->data == NULL) {
-			v_error("malloc(array) failed\n");
-			return -1;
-		}
-		v_debug("allocated new array of size %llu (%llu slots)\n",
-				sizeof(void*) * v->size, v->size);
-	}
-
-	/* When the last array slot is exhausted, increase the size of the
-	 * array by multiplying it by the resize factor.
-	 * Realloc leaves the contents at the beginning of the array unchanged;
-	 * the newly-allocated memory will be uninitialized.
-	 */
-	if (v->size == v->count) {
-		v->size *= VECTOR_RESIZE_FACTOR;
-		v->data = realloc(v->data, sizeof(void*) * v->size);
-		if (v->data == NULL) {
-			v_error("realloc(array) failed\n");
-			return -1;
-		}
-		v_debug("re-allocated array, now has size %llu (%llu slots)\n",
-				sizeof(void*) * v->size, v->size);
-	}
-
-	v->data[v->count] = e;
-	v->count++;
-	v_debug("stored new element %s in slot %llu (now count=%llu, size=%llu)\n",
-			(char *)(v->data[(v->count)-1]), v->count-1, v->count, v->size);
-
-	return 0;
-}
-
-int vector_set(vector *v, unsigned long long idx, void *e, void **old_e)
-{
-	if (v == NULL) {
-		v_error("v is NULL\n");
-		return -1;
-	}
-	if (idx >= v->count) {
-		if (VECTOR_DIE_ON_OOB) {
-			v_die("index %llu out-of-bounds, v->count=%llu\n", idx, v->count);
-		}
-		v_error("index %llu out-of-bounds, v->count=%llu\n", idx, v->count);
-		return -1;
-	}
-
-	*old_e = v->data[idx];
-	v->data[idx] = e;
-	v_debug("stored element %s in slot %llu (count=%llu, size=%llu)\n",
-			(char *)(v->data[idx]), idx, v->count, v->size);
-
-	return 0;
-}
-
-int vector_get(vector *v, unsigned long long idx, void **e)
-{
-	if (v == NULL) {
-		v_error("v is NULL\n");
-		return -1;
-	}
-	if (idx >= v->count) {
-		if (VECTOR_DIE_ON_OOB) {
-			v_die("index %llu out-of-bounds, v->count=%llu\n", idx, v->count);
-		}
-		v_error("index %llu out-of-bounds, v->count=%llu\n", idx, v->count);
-		return -1;
-	}
-
-	*e = v->data[idx];
-	v_debug("got element %s from slot %llu (count=%llu, size=%llu)\n",
-			(char *)(*e), idx, v->count, v->size);
-
-	return 0;
-}
-
-int vector_delete(vector *v, unsigned long long idx, void **e)
-{
-	unsigned long long i;
-
-	if (v == NULL) {
-		v_error("v is NULL\n");
-		return -1;
-	}
-	if (idx >= v->count) {
-		if (VECTOR_DIE_ON_OOB) {
-			v_die("index %llu out-of-bounds, v->count=%llu\n", idx, v->count);
-		}
-		v_error("index %llu out-of-bounds, v->count=%llu\n", idx, v->count);
-		return -1;
-	}
-
-	/* Don't free the element to be deleted, but set *e to point to it
-	 * so that the caller can free it. Then, shift all of the other
-	 * elements in the array down one slot:
-	 */
-	v_debug("deleting element %s from slot %llu\n", (char *)v->data[idx], idx);
-	if (e) {
-		*e = v->data[idx];
-	}
-	for (i = idx; i < v->count - 1; i++) {
-		v->data[i] = v->data[i+1];
-		v_debug("shifted element %s from slot %llu down to slot %llu\n",
-				(char *)(v->data[i]), i+1, i);
-	}
-	v->count--;
-	v_debug("now count=%llu, size=%llu (resize factor=%u)\n", v->count, v->size,
-			VECTOR_RESIZE_FACTOR);
-
-	/* Shrink the array if the number of used slots falls below the number
-	 * of allocated slots divided by the resize factor times 2. We double
-	 * the resize factor when checking this condition, but only shrink the
-	 * array by a single resize factor, to avoid "pathological" behavior
-	 * where the vector reaches some size and then the client repeatedly
-	 * adds one element and deletes one element, causing a resize on every
-	 * operation (note: this analysis is not scientific nor empirical).
+	/* In this initial implementation, we don't bother to keep track of
+	 * the worker thread IDs, so we can't force them to exit immediately
+	 * by using pthread_cancel() - this is a TODO item.
 	 *
-	 * In the condition below, <= causes resizing to happen a bit earlier
-	 * and seems better than just <. With VECTOR_RESIZE_FACTOR = 2, this
-	 * logic causes the array to be cut in half when the number of elements
-	 * is decreased to 1/4 of the number of allocated slots.
+	 * We destroy the thread pool by simply looping on the worker remove
+	 * function until all of the threads have exited.
 	 */
-	if ((v->size > VECTOR_INIT_SIZE) &&
-	    (v->count <= v->size / (VECTOR_RESIZE_FACTOR * 2))) {
-		v_debug("count %llu is <= %llu, shrinking array\n", v->count,
-				v->size / (VECTOR_RESIZE_FACTOR * 2));
-		v->size /= VECTOR_RESIZE_FACTOR;  //inverse of vector_append()
-		v->data = realloc(v->data, sizeof(void*) * v->size);
-		if (v->data == NULL) {
-			v_die("realloc(array) failed\n");
+	if (!wait) {
+		tp_error("not supported yet: forced cancellation of worker threads. "
+				"Will wait for them all to finish instead\n");
+	}
+	while (tp->num_workers > 0) {
+		uret = threadpool_remove_worker(tp, wait);
+		if (uret == UINT32_MAX || uret != tp->num_workers) {
+			tp_error("threadpool_remove_worker() returned unexpected "
+					"value %u; all threads may not be cleaned up!\n", uret);
+			break;
 		}
-		v_debug("shrunk array, now has size %llu (%llu slots)\n",
-				sizeof(void*) * v->size, v->size);
 	}
 
-	return 0;
+	/* Now free everything that we allocated: */
+	kp_cond_destroy("exit cond", &(tp->exit_cond));
+	kp_cond_destroy("task_available cond", &(tp->task_available));
+	kp_mutex_destroy("thread pool mutex", &(tp->lock));
+	queue_destroy(tp->task_queue);
+	kp_free((void **)(&tp), tp->use_nvm);
+
+	tp_debug("successfully destroyed thread pool\n");
+	return;
 }
 
-void vector_free_contents(vector *v)
-{
-	unsigned long long i, count;
+int threadpool_add_task(threadpool *tp, task_function task_fn, void *arg) {
+	int ret, retval;
+	task *next_task;
 
-	if (v == NULL) {
-		v_error("v is NULL\n");
-		return;
+	if (!tp || !task_fn) {
+		tp_error("got a NULL argument: tp=%p, task_fn=%p\n", tp, task_fn);
+		return -1;
 	}
 
-	count = v->count;
-	for (i = 0; i < count; i++) {
-		if (v->data[i]) {
-			v_debug("freeing element %s from slot %llu\n",
-					(char *)(v->data[i]), i);
-			free(v->data[i]);
+	kp_kpalloc((void **)(&next_task), sizeof(task), tp->use_nvm);
+	if (!next_task) {
+		tp_error("malloc(next_task) failed\n");
+		return -1;
+	}
+	next_task->task_fn = task_fn;
+	next_task->arg = arg;
+	next_task->use_nvm = tp->use_nvm;
+
+	retval = 0;
+	kp_mutex_lock("add task", tp->lock);
+
+	ret = queue_enqueue(tp->task_queue, (void *)next_task, task_free_fn);
+	if (ret != 0) {
+		tp_error("queue_enqueue returned error=%d\n", ret);
+		retval = -1;
+	} else {
+		ret = pthread_cond_signal(tp->task_available);
+		if (ret != 0) {
+			tp_error("pthread_cond_signal(task_available) returned error=%d\n",
+					ret);
+			retval = -1;
 		} else {
-			v_debug("NULL pointer in array, not freeing it\n");
+			tp_debug("successfully added a task and signaled task_available "
+					"condition\n");
 		}
 	}
-	v_debug("successfully freed %llu elements from vector\n", count);
+
+	kp_mutex_unlock("add task", tp->lock);
+
+	return retval;
 }
 
-void vector_free(vector *v)
-{
-	if (v == NULL) {
-		v_error("v is NULL\n");
-		return;
+unsigned int threadpool_get_worker_count(threadpool *tp) {
+	if (!tp) {
+		tp_error("got a NULL argument: tp=%p\n", tp);
+		return UINT32_MAX;
+	}
+	return tp->num_workers;
+}
+
+/* The function that created worker threads will run. The argument is a
+ * pointer to the threadpool struct itself, which contains all of the
+ * necessary locks and condition variables.
+ *
+ * IMPORTANT: this function must always decrement the thread pool's
+ * num_workers and signal its exit condition before returning; otherwise,
+ * the client may deadlock in threadpool_destroy().
+ *
+ * Returns: NULL.
+ */
+void *threadpool_worker_fn(void *arg) {
+	threadpool *tp;
+	void *dequeued;
+	task *next_task;
+	int ret;
+
+	tp = (threadpool *)arg;
+	if (!tp) {
+		tp_error("got a NULL arg: tp=%p\n", tp);
+		tp_error("Returning NULL now; deadlock may result in "
+				"threadpool_destroy() because we can't decrement num_workers "
+				"here!\n");
+		return NULL;
 	}
 
-	free(v->data);
-	free(v);
-	v_debug("freed vector's array and vector struct itself\n");
+	tp_debug("new worker thread about to enter worker loop\n");
+
+	/* NOTE: when we break out of this loop, we will still hold the tp->lock! */
+	while (true) {
+		/* Get a task, waiting on the condition variable if one is not
+		 * currently available. We grab the threadpool lock around this
+		 * entire sequence (pthread_cond_wait releases the lock while
+		 * waiting).
+		 */
+		kp_mutex_lock("worker loop", tp->lock);
+		while (queue_is_empty(tp->task_queue)) {
+			ret = pthread_cond_wait(tp->task_available, tp->lock);
+			if (ret != 0) {
+				tp_error("pthread_cond_wait() returned error=%d, breaking "
+						"out of loop!\n", ret);
+				break;
+			}
+			if (tp->worker_exit) {
+				tp_debug("somebody set tp->worker_exit, breaking out of "
+						"loop\n");
+				break;
+			}
+		}
+		ret = queue_dequeue(tp->task_queue, &dequeued);
+		if (ret == 1) {
+			tp_warn("unexpected: dequeued an empty queue!\n");
+			kp_mutex_unlock("worker loop", tp->lock);
+			continue;  //loop again...
+		} else if (ret != 0 || !dequeued) {
+			tp_error("queue dequeue failed: ret=%d, dequeued=%p\n",
+					ret, dequeued);
+			break;
+		}
+		kp_mutex_unlock("worker loop", tp->lock);
+
+		/* Perform the task: */
+		tp_debug("worker thread about to perform a new task\n");
+		next_task = (task *)dequeued;
+		next_task->task_fn(next_task->arg);
+		  //todo: check/use return values?
+		task_free_fn((void *)next_task);
+		tp_debug("worker thread completed its task and freed it, looping "
+				"again\n");
+	}
+	
+	/* At this point, we should still hold the threadpool lock. We must
+	 * decrement num_workers and signal the exit condition before returning!
+	 * We also set tp->worker_exit to false, so that no other worker threads
+	 * will see it set to true.
+	 */
+	tp_debug("worker thread broke out of worker loop\n");
+	tp->num_workers -= 1;
+	tp->worker_exit = false;
+	ret = pthread_cond_broadcast(tp->exit_cond);
+	if (ret != 0) {
+		tp_error("pthread_cond_broadcast() returned error=%d; oh well...\n",
+				ret);
+	}
+	kp_mutex_unlock("worker exit", tp->lock);
+	return NULL;
 }
 
-unsigned int vector_struct_size()
-{
-	return sizeof(vector);
+/* Note that this function is called by threadpool_create(), in addition
+ * to being callable by the client.
+ */
+unsigned int threadpool_add_worker(threadpool *tp) {
+	int ret;
+	pthread_t new_thread_id;
+
+	if (!tp) {
+		tp_error("got a NULL argument: tp=%p\n", tp);
+		return UINT32_MAX;
+	}
+	tp_debug("adding a worker to threadpool which currently has %u threads\n",
+			tp->num_workers);
+	
+	kp_mutex_lock("threadpool add worker", tp->lock);
+	/* Use default thread attributes. The argument to threadpool_worker_fn
+	 * is a pointer to the threadpool struct itself.
+	 */
+	ret = pthread_create(&new_thread_id, NULL, threadpool_worker_fn,
+			(void *)tp);
+	if (ret != 0) {
+		tp_error("pthread_create() returned error=%d\n", ret);
+		kp_mutex_unlock("threadpool add worker", tp->lock);
+		return UINT32_MAX;
+	}
+	tp->num_workers += 1;
+	kp_mutex_unlock("threadpool add worker", tp->lock);
+
+	tp_debug("successfully added a worker to threadpool, now has %u threads\n",
+			tp->num_workers);
+	return tp->num_workers;
+}
+
+unsigned int threadpool_remove_worker(threadpool *tp, bool wait) {
+	unsigned int orig_num_workers;
+	int ret;
+
+	if (!tp) {
+		tp_error("got a NULL argument: tp=%p\n", tp);
+		return UINT32_MAX;
+	}
+
+	orig_num_workers = tp->num_workers;
+	if (orig_num_workers == 0) {
+		tp_error("no worker threads in pool right now, just returning\n");
+		return 0;
+	}
+	tp_debug("removing one worker from thread pool: wait=%s, thread pool "
+			"currently has %u workers\n", wait ? "true" : "false",
+			orig_num_workers);
+
+	/* In this initial implementation, we don't bother to keep track of
+	 * the worker thread IDs, so we can't force them to exit immediately
+	 * by using pthread_cancel() - this is a TODO item.
+	 *
+	 * Instead, we set worker_exit to true to tell some worker thread to
+	 * exit on its next loop, then signal the task_available condition to
+	 * wake up a thread, which will see that worker_exit is set, break out
+	 * of its loop, decrement the number of workers, reset worker_exit back
+	 * to false, and signal us here on the exit_cond before exiting.
+	 */
+	if (!wait) {
+		tp_error("not supported yet: forced cancellation of worker threads. "
+				"Will wait for a thread to finish instead\n");
+	}
+	kp_mutex_lock("remove worker", tp->lock);
+	tp->worker_exit = true;
+	while (orig_num_workers == tp->num_workers) {
+		/* This broadcast must happen before we wait on the exit_cond!! */
+		ret = pthread_cond_broadcast(tp->task_available);
+		if (ret != 0) {
+			tp_error("pthread_cond_broadcast() returned error=%d\n", ret);
+			break;
+		}
+		ret = pthread_cond_wait(tp->exit_cond, tp->lock);
+		if (ret != 0) {
+			tp_error("pthread_cond_wait() returned error=%d\n", ret);
+			break;
+		}
+	}
+	kp_mutex_unlock("remove worker", tp->lock);
+
+	if (ret != 0) {
+		tp_error("ret is non-zero, returning error=UINT32_MAX\n");
+		return UINT32_MAX;
+	}
+#ifdef TP_ASSERT
+	else {
+		if (orig_num_workers != tp->num_workers + 1) {
+			tp_die("unexpected: num_workers was %u, but is now %u\n",
+					orig_num_workers, tp->num_workers);
+		}
+		if (tp->worker_exit) {
+			tp_die("unexpected: thread exited but did not reset worker_exit "
+					"to false\n");
+		}
+	}
+#endif
+
+	tp_debug("successfully removed a worker thread from pool; now has %u "
+			"workers\n", tp->num_workers);
+	return tp->num_workers;
+}
+
+#if 0
+void threadpool_destroy(threadpool *tp, bool wait) {
+	if (!tp) {
+		tp_error("got a NULL argument: tp=%p\n", tp);
+		return;
+	}
+	tp_debug("destroying thread pool; wait=%s, thread pool currently has "
+			"%u workers\n", wait ? "true" : "false", tp->num_workers);
+
+	/* In this initial implementation, we don't bother to keep track of
+	 * the worker thread IDs, so we can't force them to exit immediately
+	 * by using pthread_cancel() - this is a TODO item.
+	 *
+	 * Instead, we set worker_exit to true to tell all of the worker
+	 * threads to exit on their next loop, and then we wait for all of
+	 * them to exit themselves. When each thread exits, it MUST decrement
+	 * num_workers, and it must signal the exit_cond to wake up the thread
+	 * waiting here. ADDITIONALLY, the thread here must signal (broadcast,
+	 * really) the task_available condition on each loop, so that no worker
+	 * threads keep waiting for tasks to arrive. Make sure that the broadcast
+	 * happens BEFORE the wait!
+	 */
+	if (!wait) {
+		tp_error("not supported yet: forced cancellation of worker threads. "
+				"Will wait for them all to finish instead\n");
+	}
+	tp->worker_exit = true;
+	kp_mutex_lock("threadpool_destroy", tp->lock);
+	while (tp->num_workers > 0) {
+		ret = pthread_cond_broadcast(tp->task_available);
+		if (ret != 0) {
+			tp_error("pthread_cond_broadcast() returned error=%d; skipping "
+					"thread cleanup!\n", ret);
+			break;
+		}
+		ret = pthread_cond_wait(tp->exit_cond, tp->lock);
+		if (ret != 0) {
+			tp_error("pthread_cond_wait() returned error=%d; skipping "
+					"thread cleanup!\n", ret);
+			break;
+		}
+	}
+	kp_mutex_unlock("threadpool_destroy", tp->lock);
+
+	/* Now free everything that we allocated: */
+	kp_cond_destroy("exit cond", tp->exit);
+	kp_cond_destroy("task_available cond", tp->task_available);
+	kp_mutex_destroy("thread pool mutex", tp->lock);
+	queue_destroy(tp->task_queue);
+	kp_free((void **)(&tp), tp->use_nvm);
+
+	tp_debug("successfully destroyed thread pool\n");
+	return 0;
 }
 #endif
 
