@@ -5,15 +5,59 @@
 
 #include <stdlib.h>
 #include <time.h>
+#include <unistd.h>
 #include "queue.h"
 #include "threadpool.h"
 #include "threadpool_macros.h"
 
 bool use_nvm = true;
 
+void short_task(void *arg) {
+	unsigned int digit, value;
+	unsigned long long sum;
+
+	value = (unsigned int)arg;  //32-bit on burrard
+	printf("starting short task, value is: %u\n", value);
+
+	sum = 0;
+	while (true) {
+		digit = value % 10;
+		sum += digit;
+		value = value / 10;  //shift right
+		if (value <= 0) {
+			break;
+		}
+	}
+
+	printf("finished short task, sum: %llu\n", sum);
+	return;
+}
+
+void long_task(void *arg) {
+	int i, j, inner, outer;
+	unsigned long long sum;
+
+	/* One thousand million is one billion, which is approx. one second
+	 * on burrard... so ten seconds is ten thousand million? Actually,
+	 * turns out to be about twice as long as that. */
+	inner = 1000000;
+	outer = 2000;
+	sum = (unsigned long long)pthread_self();
+	printf("starting long task, initial value: %llu\n", sum);
+
+	for (i = 0; i < outer; i++) {
+		for (j = 0; j < inner; j++) {
+			sum += j;
+		}
+	}
+
+	printf("long task complete, calculated sum: %llu\n", sum);
+	return;
+}
+
+#if 0
 void stress_test_queue()
 {
-#if 0
 	int i, j, ret;
 	unsigned long long idx, count;
 	unsigned long tid;
@@ -91,8 +135,8 @@ void stress_test_queue()
 	/* Free vector: */
 	vector_free_contents(v);
 	vector_free(v);
-#endif
 }
+#endif
 
 void test_queue(void) {
 	int ret;
@@ -213,15 +257,95 @@ void test_queue(void) {
 
 void test_threadpool(void) {
 	int ret;
+	unsigned int uret;
+	bool wait = true;
 	threadpool *tp;
 
-	ret = threadpool_create(&tp, 1, use_nvm);
+	/* Create and destroy empty threadpool: */
+	ret = threadpool_create(&tp, 0, use_nvm);
 	tp_testcase_int("threadpool create", 0, ret);
 	if (ret != 0) {
 		tp_die("threadpool_create() failed\n");
 	}
+	uret = threadpool_get_worker_count(tp);
+	tp_testcase_uint("worker count", 0, uret);
+	threadpool_destroy(tp, wait);
+	tp_testcase_int("threadpool destroy empty", 0, 0);
 
-	threadpool_destroy(tp, true);  //2nd arg is "wait"
+	/* Create empty threadpool, add a worker and destroy: */
+	ret = threadpool_create(&tp, 0, use_nvm);
+	tp_testcase_int("threadpool create", 0, ret);
+	if (ret != 0) {
+		tp_die("threadpool_create() failed\n");
+	}
+	uret = threadpool_add_worker(tp);
+	tp_testcase_uint("add worker", 1, uret);
+	threadpool_destroy(tp, wait);
+	tp_testcase_int("threadpool destroy 1", 0, 0);
+
+	/* Create empty threadpool, add a worker, remove a worker and destroy: */
+	ret = threadpool_create(&tp, 0, use_nvm);
+	tp_testcase_int("threadpool create", 0, ret);
+	if (ret != 0) {
+		tp_die("threadpool_create() failed\n");
+	}
+	uret = threadpool_add_worker(tp);
+	tp_testcase_uint("add worker", 1, uret);
+	uret = threadpool_get_worker_count(tp);
+	tp_testcase_uint("worker count", 1, uret);
+	uret = threadpool_get_task_count(tp);
+	tp_testcase_int("task count", 0, uret);
+	uret = threadpool_remove_worker(tp, wait);
+	tp_testcase_uint("remove worker", 0, uret);
+	uret = threadpool_get_worker_count(tp);
+	tp_testcase_uint("worker count", 0, uret);
+	threadpool_destroy(tp, wait);
+	tp_testcase_int("threadpool destroy 0", 0, 0);
+
+	/* Two short tasks: */
+	ret = threadpool_create(&tp, 2, use_nvm);
+	tp_testcase_int("threadpool create", 0, ret);
+	if (ret != 0) {
+		tp_die("threadpool_create() failed\n");
+	}
+	uret = threadpool_get_worker_count(tp);
+	tp_testcase_uint("worker count", 2, uret);
+	ret = threadpool_add_task(tp, short_task, (void *)4123);
+	tp_testcase_int("add task", 0, ret);
+	ret = threadpool_add_task(tp, short_task, (void *)5142382);
+	tp_testcase_int("add task", 0, ret);
+	uret = threadpool_get_task_count(tp);
+	tp_testcase_int("task count", 2, uret);  //NOTE: not guaranteed!!
+	tp_test("waiting for tasks to complete: sleeping...\n");
+	sleep(2);
+	uret = threadpool_get_task_count(tp);
+	tp_testcase_int("task count", 0, uret);  //NOTE: not guaranteed!!
+
+	/* Two long tasks: */
+	ret = threadpool_add_task(tp, long_task, NULL);
+	tp_testcase_int("add task", 0, ret);
+	ret = threadpool_add_task(tp, long_task, NULL);
+	tp_testcase_int("add task", 0, ret);
+	uret = threadpool_get_task_count(tp);
+	tp_testcase_int("task count", 2, uret);  //NOTE: not guaranteed!!
+	tp_test("waiting for tasks to complete: sleeping...\n");
+	sleep(8);
+	uret = threadpool_get_task_count(tp);
+	tp_testcase_int("task count", 0, uret);  //NOTE: not guaranteed!!
+
+	/* More tasks than threads in pool: */
+	ret = threadpool_add_task(tp, long_task, NULL);
+	tp_testcase_int("add task", 0, ret);
+	ret = threadpool_add_task(tp, short_task, (void *)4123);
+	tp_testcase_int("add task", 0, ret);
+	ret = threadpool_add_task(tp, short_task, (void *)5142382);
+	tp_testcase_int("add task", 0, ret);
+	ret = threadpool_add_task(tp, long_task, NULL);
+	tp_testcase_int("add task", 0, ret);
+	uret = threadpool_get_task_count(tp);
+	tp_testcase_int("task count", 4, uret);  //NOTE: not guaranteed!!
+
+	threadpool_destroy(tp, wait);
 	tp_testcase_int("threadpool destroy", 0, 0);
 
 	return;
@@ -230,9 +354,19 @@ void test_threadpool(void) {
 int main(int argc, char *argv[])
 {
 	test_queue();
-	stress_test_queue();
+	//stress_test_queue();
 
 	test_threadpool();
+#if 0
+	short_task((void *)1);
+	short_task((void *)12);
+	short_task((void *)123);
+	short_task((void *)1234);
+	short_task((void *)51234);
+	long_task(NULL);
+#endif
+
+	printf("\nDon't forget to run this test file under valgrind too!\n");
 
 	return 0;
 #if 0

@@ -40,6 +40,9 @@ typedef void (task_function)(void *arg);
  */
 int threadpool_add_task(threadpool *tp, task_function task_fn, void *arg);
 
+/* Returns: the number of tasks in the task queue. */
+unsigned int threadpool_get_task_count(threadpool *tp);
+
 /* Returns: the number of worker threads currently in the thread pool. */
 unsigned int threadpool_get_worker_count(threadpool *tp);
 

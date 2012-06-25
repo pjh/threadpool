@@ -50,9 +50,12 @@ int threadpool_create(threadpool **tp, unsigned int num_workers,
 		tp_error("got a NULL argument: tp=%p\n", tp);
 		return -1;
 	}
-	if (num_workers == 0 || num_workers == UINT32_MAX) {
+	if (num_workers == UINT32_MAX) {
 		tp_error("invalid number of worker threads: %u\n", num_workers);
 		return -1;
+	}
+	if (num_workers == 0) {
+		tp_warn("creating a thread pool with 0 workers!\n");
 	}
 	tp_debug("creating new thread pool with %u workers\n", num_workers);
 
@@ -198,6 +201,14 @@ int threadpool_add_task(threadpool *tp, task_function task_fn, void *arg) {
 	kp_mutex_unlock("add task", tp->lock);
 
 	return retval;
+}
+
+unsigned int threadpool_get_task_count(threadpool *tp) {
+	if (!tp) {
+		tp_error("got a NULL argument: tp=%p\n", tp);
+		return UINT32_MAX;
+	}
+	return queue_length(tp->task_queue);
 }
 
 unsigned int threadpool_get_worker_count(threadpool *tp) {

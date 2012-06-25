@@ -29,5 +29,5 @@ test_threadpool: test_threadpool.c $(TP_OBJ)
 	$(CC) -o $@ $^ $(KP_STUFF) $(CFLAGS) $(LIBS)
 
 clean:
-	rm -f *.o $(ALL)
+	rm -f *.o $(ALL) tags
 
