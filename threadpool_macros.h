@@ -76,10 +76,25 @@
 #define tp_debug_lock(f, a...)  do { ; } while(0)
 #endif
 
-#define tp_testcase_int(tid, description, expected, actual) do { \
-	fprintf(stdout, "TEST %s: %lu: %s: expected=%d, actual=%d\n", \
+#define tp_testcase_int(description, expected, actual) do { \
+	fprintf(stdout, "TEST %s: %llu: %s: expected=%d, actual=%d\n", \
 			(expected == actual) ? "PASS" : "FAIL", \
-			tid, description, expected, actual); \
+			(unsigned long long)pthread_self(), description, \
+			expected, actual); \
+} while(0)
+
+#define tp_testcase_uint(description, expected, actual) do { \
+	fprintf(stdout, "TEST %s: %llu: %s: expected=%u, actual=%u\n", \
+			(expected == actual) ? "PASS" : "FAIL", \
+			(unsigned long long)pthread_self(), description, \
+			expected, actual); \
+} while(0)
+
+#define tp_testcase_ptr(description, expected, actual) do { \
+	fprintf(stdout, "TEST %s: %llu: %s: expected=%p, actual=%p\n", \
+			(expected == actual) ? "PASS" : "FAIL", \
+			(unsigned long long)pthread_self(), description, \
+			expected, actual); \
 } while(0)
 
 #define tp_testcase_uint64(tid, description, expected, actual) do { \

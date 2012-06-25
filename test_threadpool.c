@@ -1,5 +1,5 @@
-/* Peter Hornyack and Katelin Bailey
- * 12/8/11
+/* Peter Hornyack
+ * 2012-06-25
  * University of Washington
  */
 
@@ -8,6 +8,8 @@
 #include "queue.h"
 #include "threadpool.h"
 #include "threadpool_macros.h"
+
+bool use_nvm = true;
 
 void stress_test()
 {
@@ -94,18 +96,56 @@ void stress_test()
 
 void test_queue(void) {
 	int ret;
+	queue *q;
+	void *e1, *e2;
+	unsigned int uret;
+
+	ret = queue_create(&q, use_nvm);
+	tp_testcase_int("queue_create", 0, ret);
+	if (ret != 0) {
+		tp_die("queue_create() returned error=%d\n", ret);
+	}
+
+	ret = queue_dequeue(q, &e1);
+	tp_testcase_int("dequeue empty queue", 1, ret);
+	uret = queue_length(q);
+	tp_testcase_uint("queue length", 0, uret);
+	e1 = malloc(1);  //ignore potential allocation failure
+	ret = queue_enqueue(q, e1, free);
+	tp_testcase_int("enqueue", 0, ret);
+	uret = queue_length(q);
+	tp_testcase_uint("queue length", 1, uret);
+	ret = queue_dequeue(q, &e2);
+	tp_testcase_int("dequeue", 0, ret);
+	tp_testcase_ptr("dequeue", e1, e2);
+	uret = queue_length(q);
+	tp_testcase_uint("queue length", 0, uret);
+	ret = queue_dequeue(q, &e2);
+	tp_testcase_int("dequeue empty", 1, ret);
+	uret = queue_length(q);
+	tp_testcase_uint("queue length", 0, uret);
+	ret = queue_enqueue(q, e1, free);
+	tp_testcase_int("enqueue", 0, ret);
+	queue_destroy(q);
+	tp_testcase_int("destroy non-empty queue", 0, 0);
+
+	return;
 }
 
 void test_threadpool(void) {
 	int ret;
 	threadpool *tp;
 
-	ret = threadpool_create(&tp, 1, true);
+	ret = threadpool_create(&tp, 1, use_nvm);
+	tp_testcase_int("threadpool create", 0, ret);
 	if (ret != 0) {
 		tp_die("threadpool_create() failed\n");
 	}
 
+	threadpool_destroy(tp, true);  //2nd arg is "wait"
+	tp_testcase_int("threadpool destroy", 0, 0);
 
+	return;
 }
 
 int main(int argc, char *argv[])

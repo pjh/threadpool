@@ -223,6 +223,7 @@ void *threadpool_worker_fn(void *arg) {
 	void *dequeued;
 	task *next_task;
 	int ret;
+	bool outer_loop;
 
 	tp = (threadpool *)arg;
 	if (!tp) {
@@ -235,8 +236,12 @@ void *threadpool_worker_fn(void *arg) {
 
 	tp_debug("new worker thread about to enter worker loop\n");
 
-	/* NOTE: when we break out of this loop, we will still hold the tp->lock! */
-	while (true) {
+	/* Be careful with "break" statements here: there are two while loops!
+	 * NOTE: when we break out of the OUTER loop, we will still hold the
+	 * tp->lock!
+	 */
+	outer_loop = true;
+	while (outer_loop) {
 		/* Get a task, waiting on the condition variable if one is not
 		 * currently available. We grab the threadpool lock around this
 		 * entire sequence (pthread_cond_wait releases the lock while
@@ -244,26 +249,49 @@ void *threadpool_worker_fn(void *arg) {
 		 */
 		kp_mutex_lock("worker loop", tp->lock);
 		while (queue_is_empty(tp->task_queue)) {
+			/* Important: this check must come before the wait! Otherwise,
+			 * a thread that was just created or that was just performing
+			 * a task will miss the setting of worker_exit and the signal
+			 * on task_available, and will wait forever.
+			 */
+			if (tp->worker_exit) {
+				tp_debug("somebody set tp->worker_exit, breaking out of "
+						"inner loop\n");
+				outer_loop = false;
+				break;
+			}
 			ret = pthread_cond_wait(tp->task_available, tp->lock);
 			if (ret != 0) {
 				tp_error("pthread_cond_wait() returned error=%d, breaking "
-						"out of loop!\n", ret);
+						"out of inner loop!\n", ret);
+				outer_loop = false;
 				break;
 			}
-			if (tp->worker_exit) {
+		}
+		/* Check worker_exit again here, in case somebody set it while we
+		 * were waiting on task_available AND a new task arrived at the
+		 * queue at/near the same time...
+		 */
+		if (!outer_loop || tp->worker_exit) {
+#ifdef TP_DEBUG
+			if (!outer_loop) {
+				tp_debug("outer_loop set to false, so breaking out of "
+						"outer loop too\n");
+			} else if (tp->worker_exit) {
 				tp_debug("somebody set tp->worker_exit, breaking out of "
-						"loop\n");
-				break;
+						"outer loop\n");
 			}
+#endif
+			break;  //still hold the tp->lock!
 		}
 		ret = queue_dequeue(tp->task_queue, &dequeued);
 		if (ret == 1) {
 			tp_warn("unexpected: dequeued an empty queue!\n");
 			kp_mutex_unlock("worker loop", tp->lock);
-			continue;  //loop again...
+			continue;  //after unlocking, outer loop again...
 		} else if (ret != 0 || !dequeued) {
-			tp_error("queue dequeue failed: ret=%d, dequeued=%p\n",
-					ret, dequeued);
+			tp_error("queue dequeue failed: ret=%d, dequeued=%p. Breaking "
+					"out of outer loop\n", ret, dequeued);
 			break;
 		}
 		kp_mutex_unlock("worker loop", tp->lock);
@@ -283,9 +311,11 @@ void *threadpool_worker_fn(void *arg) {
 	 * We also set tp->worker_exit to false, so that no other worker threads
 	 * will see it set to true.
 	 */
-	tp_debug("worker thread broke out of worker loop\n");
+	tp_debug("worker thread here after outer worker loop\n");
 	tp->num_workers -= 1;
 	tp->worker_exit = false;
+	tp_debug("decremented num_workers to %u and reset worker_exit to false\n",
+			tp->num_workers);
 	ret = pthread_cond_broadcast(tp->exit_cond);
 	if (ret != 0) {
 		tp_error("pthread_cond_broadcast() returned error=%d; oh well...\n",

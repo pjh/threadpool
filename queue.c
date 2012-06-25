@@ -99,6 +99,8 @@ void queue_destroy(queue *q) {
 #endif
 		next = head->next;
 		if (head->free_fn) {
+			tp_debug("calling free_fn %p on data %p\n", head->free_fn,
+					head->data);
 			head->free_fn(head->data);
 		}
 		kp_free((void **)(&head), q->use_nvm);
@@ -204,7 +206,7 @@ int queue_dequeue(queue *q, void **e) {
 	/* Don't forget to free the element that we allocated: */
 	kp_free((void **)(&head), q->use_nvm);
 
-	tp_debug("returning element at %p, queue length is now %u\n", *e, q->len);
+	tp_debug("returning element %p, queue length is now %u\n", *e, q->len);
 	return 0;
 }
 
