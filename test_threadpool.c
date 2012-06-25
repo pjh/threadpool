@@ -3,6 +3,7 @@
  * University of Washington
  */
 
+#include <sched.h>
 #include <stdlib.h>
 #include <time.h>
 #include <unistd.h>
@@ -54,89 +55,6 @@ void long_task(void *arg) {
 	printf("long task complete, calculated sum: %llu\n", sum);
 	return;
 }
-
-#if 0
-void stress_test_queue()
-{
-	int i, j, ret;
-	unsigned long long idx, count;
-	unsigned long tid;
-	vector *v;
-	void *e;
-	long int rand_int;
-	ssize_t size;
-	char *final;
-
-	if (APPENDS_MAX <= APPENDS_MIN) {
-		v_die("invalid APPENDS_MAX %u and APPENDS_MIN %u\n", APPENDS_MAX,
-				APPENDS_MIN);
-	}
-	if (DELETES_MAX <= DELETES_MIN) {
-		v_die("invalid DELETES_MAX %u and DELETES_MIN %u\n", DELETES_MAX,
-				DELETES_MIN);
-	}
-
-	srandom((unsigned int)time(NULL));
-	tid = pthread_self();
-	size = ELT_SIZE_MIN;
-	ret = vector_alloc(&v);
-
-	for (i = 0; i < LOOPS; i++) {
-		/* First, do some appends: */
-		rand_int = random();
-		rand_int = (rand_int % (APPENDS_MAX - APPENDS_MIN)) + APPENDS_MIN;
-		v_debug("appending %ld elements of size %u to vector:\n",
-				rand_int, size);
-		for (j = rand_int; j > 0; j--) {
-			e = malloc(size);
-			((char *)e)[0] = 'A' + ((i+rand_int-j)%26);
-			((char *)e)[1] = '\0';
-			ret = vector_append(v, e);
-		}
-		v_debug("appended %ld elements, now count=%llu\n", rand_int, vector_count(v));
-
-		/* Then, do some deletes: */
-		rand_int = random();
-		rand_int = (rand_int % (DELETES_MAX - DELETES_MIN)) + DELETES_MIN;
-		v_debug("deleting up to %ld values from vector\n", rand_int);
-		for (j = rand_int; j > 0; j--) {
-			count = vector_count(v);
-			if (count == 0) {
-				break;
-			}
-			idx = (i + j) % count;
-			ret = vector_delete(v, idx, &e);
-			v_debug("deleted element %s at idx=%llu, now freeing element\n",
-					(char *)e, idx);
-			free(e);
-		}
-		v_debug("deleted %ld elements, now count=%llu\n", rand_int - j,
-				vector_count(v));
-
-		/* Loop again: */
-		size = size + ELT_SIZE_DIFF;
-		if (size > ELT_SIZE_MAX) {
-			size = ELT_SIZE_MIN;
-		}
-	}
-
-	/* Print final contents of vector: */
-	count = vector_count(v);
-	v_debug("final vector count=%llu\n", count);
-	final = malloc(count + 1);
-	for (i = 0; i < count; i++) {
-		ret = vector_get(v, i, &e);
-		final[i] = ((char *)e)[0];
-	}
-	final[count] = '\0';
-	v_debug("final contents of vector: %s\n", final);
-	free(final);
-
-	/* Free vector: */
-	vector_free_contents(v);
-	vector_free(v);
-}
-#endif
 
 void test_queue(void) {
 	int ret;
@@ -257,7 +175,7 @@ void test_queue(void) {
 
 void test_threadpool(void) {
 	int ret;
-	unsigned int uret;
+	unsigned int uret, pending, active, completed;
 	bool wait = true;
 	threadpool *tp;
 
@@ -293,8 +211,8 @@ void test_threadpool(void) {
 	tp_testcase_uint("add worker", 1, uret);
 	uret = threadpool_get_worker_count(tp);
 	tp_testcase_uint("worker count", 1, uret);
-	uret = threadpool_get_task_count(tp);
-	tp_testcase_int("task count", 0, uret);
+	threadpool_get_task_counts(tp, &pending, &active, &completed);
+	tp_testcase_uint("task count", 0, pending + active + completed);
 	uret = threadpool_remove_worker(tp, wait);
 	tp_testcase_uint("remove worker", 0, uret);
 	uret = threadpool_get_worker_count(tp);
@@ -314,24 +232,26 @@ void test_threadpool(void) {
 	tp_testcase_int("add task", 0, ret);
 	ret = threadpool_add_task(tp, short_task, (void *)5142382);
 	tp_testcase_int("add task", 0, ret);
-	uret = threadpool_get_task_count(tp);
-	tp_testcase_int("task count", 2, uret);  //NOTE: not guaranteed!!
-	tp_test("waiting for tasks to complete: sleeping...\n");
-	sleep(2);
-	uret = threadpool_get_task_count(tp);
-	tp_testcase_int("task count", 0, uret);  //NOTE: not guaranteed!!
+	threadpool_get_task_counts(tp, &pending, &active, &completed);
+	tp_testcase_uint("task count", 2, pending);  //not guaranteed!!
+	tp_testcase_uint("task count", 2, pending + active + completed);
+	tp_test("waiting for short tasks to complete: sleeping...\n");
+	sleep(3);
+	threadpool_get_task_counts(tp, &pending, &active, &completed);
+	tp_testcase_uint("task count", 2, completed);  //not guaranteed!!!
 
 	/* Two long tasks: */
 	ret = threadpool_add_task(tp, long_task, NULL);
 	tp_testcase_int("add task", 0, ret);
 	ret = threadpool_add_task(tp, long_task, NULL);
 	tp_testcase_int("add task", 0, ret);
-	uret = threadpool_get_task_count(tp);
-	tp_testcase_int("task count", 2, uret);  //NOTE: not guaranteed!!
-	tp_test("waiting for tasks to complete: sleeping...\n");
-	sleep(8);
-	uret = threadpool_get_task_count(tp);
-	tp_testcase_int("task count", 0, uret);  //NOTE: not guaranteed!!
+	threadpool_get_task_counts(tp, &pending, &active, &completed);
+	tp_testcase_uint("task count", 2, pending);  //not guaranteed!!
+	tp_testcase_uint("task count", 4, pending + active + completed);
+	tp_test("waiting for long tasks to complete: sleeping...\n");
+	sleep(12);
+	threadpool_get_task_counts(tp, &pending, &active, &completed);
+	tp_testcase_uint("task count", 4, completed);  //not guaranteed!!
 
 	/* More tasks than threads in pool: */
 	ret = threadpool_add_task(tp, long_task, NULL);
@@ -342,8 +262,9 @@ void test_threadpool(void) {
 	tp_testcase_int("add task", 0, ret);
 	ret = threadpool_add_task(tp, long_task, NULL);
 	tp_testcase_int("add task", 0, ret);
-	uret = threadpool_get_task_count(tp);
-	tp_testcase_int("task count", 4, uret);  //NOTE: not guaranteed!!
+	threadpool_get_task_counts(tp, &pending, &active, &completed);
+	tp_testcase_uint("task count", 4, pending);  //not guaranteed!!
+	tp_testcase_uint("task count", 8, pending + active + completed);
 
 	threadpool_destroy(tp, wait);
 	tp_testcase_int("threadpool destroy", 0, 0);
@@ -351,12 +272,118 @@ void test_threadpool(void) {
 	return;
 }
 
+#define INITIAL_THREADS 44
+#define LOOPS 50
+#define ADDS_MIN 12
+#define ADDS_MAX 15
+#define SLEEPTIME 5
+#define TASK_LOW 80
+#define TASK_HIGH 100
+
+void stress_test_threadpool()
+{
+	int i, j, ret;
+	unsigned int total_tasks;
+	unsigned int pending, active, completed;
+	unsigned long tid;
+	threadpool *tp;
+	long int rand_int;
+
+	if (ADDS_MAX <= ADDS_MIN) {
+		tp_die("invalid ADDS_MAX %u and ADDS_MIN %u\n", ADDS_MAX,
+				ADDS_MIN);
+	}
+
+	srandom((unsigned int)time(NULL));
+	tid = pthread_self();
+	ret = threadpool_create(&tp, INITIAL_THREADS, use_nvm);
+	if (ret != 0) {
+		tp_die("threadpool_create() failed\n");
+	}
+
+	total_tasks = 0;
+	for (i = 0; i < LOOPS; i++) {
+		/* First, add some tasks: */
+		rand_int = random();
+		rand_int = (rand_int % (ADDS_MAX - ADDS_MIN)) + ADDS_MIN;
+		tp_test("adding %ld tasks to threadpool\n", rand_int);
+		for (j = rand_int; j > 0; j--) {
+			if (j % 2 == 0) {  //alternate between short and long
+				ret = threadpool_add_task(tp, short_task, (void *)i+123);
+			} else {
+				ret = threadpool_add_task(tp, long_task, NULL);
+			}
+		}
+		total_tasks += rand_int;
+		threadpool_get_task_counts(tp, &pending, &active, &completed);
+		tp_test("added %ld tasks, now task counts: pending=%u, "
+				"active=%u, completed=%u\n", rand_int,
+				pending, active, completed);
+		tp_testcase_uint("total task count", total_tasks,
+				pending + active + completed);
+
+		/* Wait for just a little while for some tasks to complete. After
+		 * sleeping, if the number of worker threads is much larger than
+		 * the number of tasks, then we expect the debug statement below
+		 * to always show 0 pending tasks. (for some reason this is not
+		 * usualy true before we sleep, even after throwing some sched_yield
+		 * calls in here.) */
+		sleep(SLEEPTIME);
+		threadpool_get_task_counts(tp, &pending, &active, &completed);
+		tp_test("after sleeping, now task counts: pending=%u, "
+				"active=%u, completed=%u\n", pending, active, completed);
+
+		/* Now, either add a thread or remove a thread: */
+		rand_int = random();
+		if (rand_int % 2 == 0) {
+			ret = threadpool_add_worker(tp);
+			tp_test("added a worker to threadpool, now worker count=%u\n",
+					threadpool_get_worker_count(tp));
+		} else {
+			ret = threadpool_remove_worker(tp, true);  //wait = true
+			tp_test("removed a worker from threadpool, now worker count=%u\n",
+					threadpool_get_worker_count(tp));
+		}
+
+		/* Monitor the number of pending tasks: */
+		threadpool_get_task_counts(tp, &pending, NULL, NULL);
+		if (pending > TASK_HIGH) {
+			while (pending > TASK_LOW) {
+				tp_test("too many tasks pending (%u), sleeping to wait for "
+						"work to be done\n", pending);
+				sleep(SLEEPTIME);
+				threadpool_get_task_counts(tp, &pending, NULL, NULL);
+				ret = threadpool_add_worker(tp);
+				tp_test("added a worker to threadpool, now worker count=%u\n",
+						threadpool_get_worker_count(tp));
+			}
+		}
+	}
+
+	/* Wait for threadpool to finish all of its tasks: */
+	threadpool_get_task_counts(tp, &pending, &active, &completed);
+	while (pending + active > 0) {
+		tp_test("threadpool still has %u pending and %u active tasks; "
+				"sleeping until they are all completed. NOTE: number of "
+				"active tasks should match number of worker threads "
+				"remaining!\n", pending, active);
+		sleep(SLEEPTIME);
+		threadpool_get_task_counts(tp, &pending, &active, &completed);
+	}
+
+	/* This is the critical test: */
+	threadpool_get_task_counts(tp, &pending, &active, &completed);
+	tp_testcase_uint("completed task count", total_tasks, completed);
+
+	threadpool_destroy(tp, true);  //wait = true
+
+	return;
+}
+
 int main(int argc, char *argv[])
 {
-	test_queue();
-	//stress_test_queue();
+//	test_queue();
 
-	test_threadpool();
 #if 0
 	short_task((void *)1);
 	short_task((void *)12);
@@ -366,81 +393,11 @@ int main(int argc, char *argv[])
 	long_task(NULL);
 #endif
 
-	printf("\nDon't forget to run this test file under valgrind too!\n");
+//	test_threadpool();
+	stress_test_threadpool();
+
+	printf("\nDon't forget to run this test file under valgrind "
+			"--leak-check=full too!\n");
 
 	return 0;
-#if 0
-	int i, ret;
-	unsigned long long count;
-	unsigned long tid;
-	vector *v;
-	void *e;
-
-	stress_test();
-	v_print("stress test complete\n");
-
-	tid = pthread_self();
-	v_print("sizeof(void *)=%u, sizeof(unsigned int)=%u, "
-			"sizeof(unsigned long int)=%u, sizeof(unsigned long)=%u, "
-			"sizeof(unsigned long long)=%u\n",
-			sizeof(void *), sizeof(unsigned int), sizeof(unsigned long int),
-			sizeof(unsigned long), sizeof(unsigned long long));
-	v_print("value of null-zero = %p\n", (void *)'\0');
-
-	ret = vector_alloc(&v);
-	v_testcase_int(tid, "vector_alloc", 0, ret);
-
-	/* TODO: how/where are these strings allocated? Only have local scope
-	 * (this main() function), right?
-	 */
-	ret = vector_append(v, "emil");
-	v_testcase_int(tid, "vector_append", 0, ret);
-	ret = vector_append(v, "hannes");
-	v_testcase_int(tid, "vector_append", 0, ret);
-	ret = vector_append(v, "lydia");
-	v_testcase_int(tid, "vector_append", 0, ret);
-	ret = vector_append(v, "olle");
-	v_testcase_int(tid, "vector_append", 0, ret);
-	ret = vector_append(v, "erik");
-	v_testcase_int(tid, "vector_append", 0, ret);
-
-	v_test("first round:\n");
-	count = vector_count(v);
-	for (i = 0; i < count; i++) {
-		ret = vector_get(v, i, &e);
-		v_testcase_int(tid, "vector_get", 0, ret);
-		v_test("got element: %s\n", (char *)e);
-	}
-
-	ret = vector_delete(v, 1, &e);  //don't free e, statically allocated
-	v_testcase_int(tid, "vector_delete", 0, ret);
-	v_testcase_string(tid, "vector_delete", "hannes", (char *)e);
-	ret = vector_delete(v, 3, &e);  //don't free e, statically allocated
-	v_testcase_int(tid, "vector_delete", 0, ret);
-	v_testcase_string(tid, "vector_delete", "erik", (char *)e);
-
-	v_test("second round:\n");
-	count = vector_count(v);
-	for (i = 0; i < count; i++) {
-		ret = vector_get(v, i, &e);
-		v_testcase_int(tid, "vector_get", 0, ret);
-		v_test("got element: %s\n", (char *)e);
-	}
-
-	ret = vector_delete(v, 3, &e);
-	v_testcase_int(tid, "vector_delete", -1, ret);
-	ret = vector_delete(v, 2, &e);  //don't free e, statically allocated
-	v_testcase_int(tid, "vector_delete", 0, ret);
-	v_testcase_string(tid, "vector_delete", "olle", (char *)e);
-	ret = vector_delete(v, 0, &e);  //don't free e, statically allocated
-	v_testcase_int(tid, "vector_delete", 0, ret);
-	v_testcase_string(tid, "vector_delete", "emil", (char *)e);
-	ret = vector_delete(v, 0, &e);  //don't free e, statically allocated
-	v_testcase_int(tid, "vector_delete", 0, ret);
-	v_testcase_string(tid, "vector_delete", "lydia", (char *)e);
-
-	vector_free(v);
-
-	return 0;
-#endif
 }

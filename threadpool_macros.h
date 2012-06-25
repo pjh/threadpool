@@ -20,7 +20,7 @@
  * TP_DEBUG_LOCK enables verbose messages for mutex and rwlock lock/unlock.
  */
 #define TP_ASSERT
-#define TP_DEBUG
+//#define TP_DEBUG
 //#define TP_DEBUG_LOCK
 
 /* Note that printing the result of pthread_self() in this way is not

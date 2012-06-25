@@ -40,8 +40,30 @@ typedef void (task_function)(void *arg);
  */
 int threadpool_add_task(threadpool *tp, task_function task_fn, void *arg);
 
-/* Returns: the number of tasks in the task queue. */
-unsigned int threadpool_get_task_count(threadpool *tp);
+/* Returns various task counts for the thread pool. Tasks that have been
+ * added to the pool but not taken by any worker threads yet are "pending."
+ * Tasks that are currently being executed by worker threads are "active."
+ * Tasks that have been completed are "completed." This function will store
+ * the current counts in any unsigned int whose pointer passed to this
+ * function is non-NULL. This function takes a lock on the threadpool, so
+ * its counts are all consistent with each other, but of course the counts
+ * may be outdated as soon they are returned.
+ */
+void threadpool_get_task_counts(threadpool *tp, unsigned int *pending,
+		unsigned int *active, unsigned int *completed);
+
+#if 0
+/* Returns: the number of tasks in the task queue. Note that this value
+ * may be inaccurate as soon as it is returned. */
+unsigned int threadpool_get_task_count_active(threadpool *tp);
+
+/* Returns: the number of tasks that have been completed by worker threads
+ * in this pool. Note that this value may be inaccurate as soon as it is
+ * returned. Additionally, if more tasks than can be counted by an unsigned
+ * integer are completed, then this value will wrap around.
+ */
+unsigned int threadpool_get_task_count_completed(threadpool *tp);
+#endif
 
 /* Returns: the number of worker threads currently in the thread pool. */
 unsigned int threadpool_get_worker_count(threadpool *tp);

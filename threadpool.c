@@ -18,6 +18,9 @@ struct threadpool_ {
 	pthread_cond_t *exit_cond;
 	bool worker_exit;
 	unsigned int num_workers;
+	unsigned int tasks_pending;
+	unsigned int tasks_active;
+	unsigned int tasks_completed;
 	bool use_nvm;
 };
 
@@ -102,6 +105,9 @@ int threadpool_create(threadpool **tp, unsigned int num_workers,
 		}
 	}
 	(*tp)->num_workers = num_workers;
+	(*tp)->tasks_pending = 0;
+	(*tp)->tasks_active = 0;
+	(*tp)->tasks_completed = 0;
 
 	tp_debug("successfully created new thread pool with %u threads\n",
 			(*tp)->num_workers);
@@ -149,6 +155,9 @@ void threadpool_destroy(threadpool *tp, bool wait) {
 			break;
 		}
 	}
+	tp_debug("done waiting, destroying threadpool with task counts "
+			"pending=%u, active=%u, completed=%u\n", tp->tasks_pending,
+			tp->tasks_active, tp->tasks_completed);
 
 	/* Now free everything that we allocated: */
 	kp_cond_destroy("exit cond", &(tp->exit_cond));
@@ -197,19 +206,66 @@ int threadpool_add_task(threadpool *tp, task_function task_fn, void *arg) {
 					"condition\n");
 		}
 	}
+	tp->tasks_pending++;
+#ifdef TP_ASSERT
+	if (tp->tasks_pending != queue_length(tp->task_queue)) {
+		tp_die("mismatch: tasks_pending=%u, but task_queue length=%u\n",
+				tp->tasks_pending, queue_length(tp->task_queue));
+	}
+#endif
 
 	kp_mutex_unlock("add task", tp->lock);
 
 	return retval;
 }
 
-unsigned int threadpool_get_task_count(threadpool *tp) {
+void threadpool_get_task_counts(threadpool *tp, unsigned int *pending,
+		unsigned int *active, unsigned int *completed) {
+	if (!tp) {
+		tp_error("got a NULL argument: tp=%p; returning immediately\n", tp);
+		return;
+	}
+
+	/* Lock the thread pool, so that all of the counts are consistent with
+	 * each other (the sum of all of the counts should equal the number of
+	 * times that threadpool_add_task() has ever been called). This could
+	 * potentially hurt performance, of course; if this is the case, then
+	 * we can disable these locks to sacrifice consistency for speed, or
+	 * simply don't call this function while relying on the threadpool to
+	 * complete tasks as quickly as possible.
+	 */
+	kp_mutex_lock("task counts lock", tp->lock);
+	if (pending) {
+		*pending = tp->tasks_pending;
+	}
+	if (active) {
+		*active = tp->tasks_active;
+	}
+	if (completed) {
+		*completed = tp->tasks_completed;
+	}
+	kp_mutex_unlock("task counts lock", tp->lock);
+
+	return;
+}
+
+#if 0
+unsigned int threadpool_get_task_count_active(threadpool *tp) {
 	if (!tp) {
 		tp_error("got a NULL argument: tp=%p\n", tp);
 		return UINT32_MAX;
 	}
 	return queue_length(tp->task_queue);
 }
+
+unsigned int threadpool_get_task_count_completed(threadpool *tp) {
+	if (!tp) {
+		tp_error("got a NULL argument: tp=%p\n", tp);
+		return UINT32_MAX;
+	}
+	return tp->completed;
+}
+#endif
 
 unsigned int threadpool_get_worker_count(threadpool *tp) {
 	if (!tp) {
@@ -235,6 +291,7 @@ void *threadpool_worker_fn(void *arg) {
 	task *next_task;
 	int ret;
 	bool outer_loop;
+	bool move_active_to_complete;
 
 	tp = (threadpool *)arg;
 	if (!tp) {
@@ -252,6 +309,7 @@ void *threadpool_worker_fn(void *arg) {
 	 * tp->lock!
 	 */
 	outer_loop = true;
+	move_active_to_complete = false;
 	while (outer_loop) {
 		/* Get a task, waiting on the condition variable if one is not
 		 * currently available. We grab the threadpool lock around this
@@ -259,6 +317,17 @@ void *threadpool_worker_fn(void *arg) {
 		 * waiting).
 		 */
 		kp_mutex_lock("worker loop", tp->lock);
+		if (move_active_to_complete) {
+			/* We check this here after we've already locked the threadpool,
+			 * rather than adding another lock/unlock sequence at the end
+			 * of the outer loop.
+			 */
+			move_active_to_complete = false;
+			tp->tasks_active--;
+			tp->tasks_completed++;
+			tp_debug("worker thread moved a task from active (%u) to "
+					"complete (%u)\n", tp->tasks_active, tp->tasks_completed);
+		}
 		while (queue_is_empty(tp->task_queue)) {
 			/* Important: this check must come before the wait! Otherwise,
 			 * a thread that was just created or that was just performing
@@ -295,6 +364,8 @@ void *threadpool_worker_fn(void *arg) {
 #endif
 			break;  //still hold the tp->lock!
 		}
+
+		/* Move a task from "pending" to "active": */
 		ret = queue_dequeue(tp->task_queue, &dequeued);
 		if (ret == 1) {
 			tp_warn("unexpected: dequeued an empty queue!\n");
@@ -305,6 +376,10 @@ void *threadpool_worker_fn(void *arg) {
 					"out of outer loop\n", ret, dequeued);
 			break;
 		}
+		tp->tasks_pending--;
+		tp->tasks_active++;
+		tp_debug("worker thread moved one task from pending (%u) to "
+				"active (%u)\n", tp->tasks_pending, tp->tasks_active);
 		kp_mutex_unlock("worker loop", tp->lock);
 
 		/* Perform the task: */
@@ -312,6 +387,8 @@ void *threadpool_worker_fn(void *arg) {
 		next_task = (task *)dequeued;
 		next_task->task_fn(next_task->arg);
 		  //todo: check/use return values?
+		
+		move_active_to_complete = true;  //see top of outer loop
 		task_free_fn((void *)next_task);
 		tp_debug("worker thread completed its task and freed it, looping "
 				"again\n");
