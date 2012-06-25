@@ -11,7 +11,7 @@
 
 bool use_nvm = true;
 
-void stress_test()
+void stress_test_queue()
 {
 #if 0
 	int i, j, ret;
@@ -97,8 +97,16 @@ void stress_test()
 void test_queue(void) {
 	int ret;
 	queue *q;
-	void *e1, *e2;
+	void *e, *e1, *e2, *e3, *e4;
 	unsigned int uret;
+
+	e1 = malloc(1);
+	e2 = malloc(22);
+	e3 = malloc(333);
+	e4 = malloc(4444);
+	if (!e1 || !e2 || !e3 || !e4) {
+		tp_die("some malloc failed\n");
+	}
 
 	ret = queue_create(&q, use_nvm);
 	tp_testcase_int("queue_create", 0, ret);
@@ -106,21 +114,20 @@ void test_queue(void) {
 		tp_die("queue_create() returned error=%d\n", ret);
 	}
 
-	ret = queue_dequeue(q, &e1);
+	ret = queue_dequeue(q, &e);
 	tp_testcase_int("dequeue empty queue", 1, ret);
 	uret = queue_length(q);
 	tp_testcase_uint("queue length", 0, uret);
-	e1 = malloc(1);  //ignore potential allocation failure
 	ret = queue_enqueue(q, e1, free);
 	tp_testcase_int("enqueue", 0, ret);
 	uret = queue_length(q);
 	tp_testcase_uint("queue length", 1, uret);
-	ret = queue_dequeue(q, &e2);
+	ret = queue_dequeue(q, &e);
 	tp_testcase_int("dequeue", 0, ret);
-	tp_testcase_ptr("dequeue", e1, e2);
+	tp_testcase_ptr("dequeue", e1, e);
 	uret = queue_length(q);
 	tp_testcase_uint("queue length", 0, uret);
-	ret = queue_dequeue(q, &e2);
+	ret = queue_dequeue(q, &e);
 	tp_testcase_int("dequeue empty", 1, ret);
 	uret = queue_length(q);
 	tp_testcase_uint("queue length", 0, uret);
@@ -128,6 +135,78 @@ void test_queue(void) {
 	tp_testcase_int("enqueue", 0, ret);
 	queue_destroy(q);
 	tp_testcase_int("destroy non-empty queue", 0, 0);
+
+	e1 = malloc(11111);  //should have been freed by queue_destroy()
+	ret = queue_create(&q, use_nvm);
+	tp_testcase_int("queue_create", 0, ret);
+	if (ret != 0) {
+		tp_die("queue_create() returned error=%d\n", ret);
+	}
+	ret = queue_enqueue(q, e1, free);
+	tp_testcase_int("enqueue e1", 0, ret);
+	ret = queue_enqueue(q, e2, free);
+	tp_testcase_int("enqueue e2", 0, ret);
+	ret = queue_enqueue(q, e3, free);
+	tp_testcase_int("enqueue e3", 0, ret);
+	ret = queue_enqueue(q, e4, free);
+	tp_testcase_int("enqueue e4", 0, ret);
+	uret = queue_length(q);
+	tp_testcase_uint("queue length", 4, uret);
+	tp_testcase_int("is_empty", queue_is_empty(q) ? 1 : 0, 0);
+	ret = queue_dequeue(q, &e);
+	tp_testcase_int("dequeue", 0, ret);
+	tp_testcase_ptr("dequeue", e, e1);
+	uret = queue_length(q);
+	tp_testcase_uint("queue length", 3, uret);
+	tp_testcase_int("is_empty", queue_is_empty(q) ? 1 : 0, 0);
+	ret = queue_dequeue(q, &e);
+	tp_testcase_int("dequeue", 0, ret);
+	tp_testcase_ptr("dequeue", e, e2);
+	uret = queue_length(q);
+	tp_testcase_uint("queue length", 2, uret);
+	tp_testcase_int("is_empty", queue_is_empty(q) ? 1 : 0, 0);
+	ret = queue_dequeue(q, &e);
+	tp_testcase_int("dequeue", 0, ret);
+	tp_testcase_ptr("dequeue", e, e3);
+	uret = queue_length(q);
+	tp_testcase_uint("queue length", 1, uret);
+	tp_testcase_int("is_empty", queue_is_empty(q) ? 1 : 0, 0);
+	ret = queue_dequeue(q, &e);
+	tp_testcase_int("dequeue", 0, ret);
+	tp_testcase_ptr("dequeue", e, e4);
+	uret = queue_length(q);
+	tp_testcase_uint("queue length", 0, uret);
+	tp_testcase_int("is_empty", queue_is_empty(q) ? 1 : 0, 1);
+
+	ret = queue_enqueue(q, e4, free);
+	tp_testcase_int("enqueue e4", 0, ret);
+	ret = queue_enqueue(q, e3, free);
+	tp_testcase_int("enqueue e3", 0, ret);
+	ret = queue_enqueue(q, e2, free);
+	tp_testcase_int("enqueue e2", 0, ret);
+	ret = queue_enqueue(q, e1, free);
+	tp_testcase_int("enqueue e1", 0, ret);
+	ret = queue_dequeue(q, &e);
+	tp_testcase_int("dequeue", 0, ret);
+	tp_testcase_ptr("dequeue", e, e4);
+	ret = queue_dequeue(q, &e);
+	tp_testcase_int("dequeue", 0, ret);
+	tp_testcase_ptr("dequeue", e, e3);
+	ret = queue_dequeue(q, &e);
+	tp_testcase_int("dequeue", 0, ret);
+	tp_testcase_ptr("dequeue", e, e2);
+	ret = queue_dequeue(q, &e);
+	tp_testcase_int("dequeue", 0, ret);
+	tp_testcase_ptr("dequeue", e, e1);
+	ret = queue_dequeue(q, &e);
+	tp_testcase_int("dequeue", 1, ret);
+	queue_destroy(q);
+	tp_testcase_int("destroy empty queue", 0, 0);
+
+	free(e1);
+	free(e2);
+	free(e3);
+	free(e4);
 
 	return;
 }
@@ -151,6 +230,7 @@ void test_threadpool(void) {
 int main(int argc, char *argv[])
 {
 	test_queue();
+	stress_test_queue();
 
 	test_threadpool();
 
