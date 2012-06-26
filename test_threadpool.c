@@ -396,6 +396,18 @@ int main(int argc, char *argv[])
 //	test_threadpool();
 	stress_test_threadpool();
 
+	/* Things to look for with stress test (ignore DEBUG output):
+	 *   While number of worker threads is greater than number of tasks,
+	 *     make sure that no tasks are left pending (i.e. after the sleep).
+	 *   When number of tasks starts to out-grow number of worker threads,
+	 *     make sure that added worker threads are assigned a pending task
+	 *     immediately (i.e. after the sleep, number of active tasks equals
+	 *     number of worker threads).
+	 *   Make sure that the total number of tasks that we add matches the
+	 *     final number of completed tasks from the thread pool.
+	 *   Anything else??
+	 */
+
 	printf("\nDon't forget to run this test file under valgrind "
 			"--leak-check=full too!\n");
 
