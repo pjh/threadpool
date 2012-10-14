@@ -4,7 +4,7 @@
 # Everything in this Makefile is kind of hacky.
 
 CC 		= gcc
-CFLAGS 	= -g -Wall -Wunused
+CFLAGS 	= -g -Wall -Wunused -D_GNU_SOURCE
 LIBS	= -lpthread
 
 default: test_threadpool

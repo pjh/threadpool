@@ -33,43 +33,43 @@
  * but possibly causes slowdown.
  */
 #define tp_print(f, a...)  do { \
-	fprintf(stdout, "TP: %lu: " f, pthread_self(), ##a); \
+	fprintf(stdout, "TP: %lu: " f, pthread_self() % 10000, ##a); \
 	fflush(stdout); \
 	} while(0)
 #define tp_warn(f, a...)  do { \
-	fprintf(stderr, "**WARNING**: %lu: %s: " f, pthread_self(), __func__, ##a); \
+	fprintf(stderr, "**WARNING**: %lu: %s: " f, pthread_self() % 10000, __func__, ##a); \
 	fflush(stderr); \
 	} while(0)
 #define tp_error(f, a...)  do { \
-	fprintf(stderr, "ERROR: %lu: %s: " f, pthread_self(), __func__, ##a); \
+	fprintf(stderr, "ERROR: %lu: %s: " f, pthread_self() % 10000, __func__, ##a); \
 	fflush(stderr); \
 	} while(0)
-#define tp_test(f, a...) fprintf(stdout, "TEST: %lu: " f, pthread_self(), ##a)
+#define tp_test(f, a...) fprintf(stdout, "TEST: %lu: " f, pthread_self() % 10000, ##a)
 
-//	fprintf(stdout, "DEBUG: %lu: %s: " f, pthread_self(), __func__, ##a);
+//	fprintf(stdout, "DEBUG: %lu: %s: " f, pthread_self() % 10000, __func__, ##a);
 #ifdef TP_DEBUG
 #define tp_debug(f, a...)  do { \
-	fprintf(stdout, "DEBUG: %llu: %s: " f, (unsigned long long)pthread_self(), __func__, ##a); \
+	fprintf(stdout, "DEBUG: %llu: %s: " f, (unsigned long long)pthread_self() % 10000, __func__, ##a); \
 	fflush(stdout); \
 	} while(0)
 #else
 #define tp_debug(f, a...)  do { ; } while(0)
 #endif
 #define tp_debug2(f, a...)  do { \
-	fprintf(stdout, "DEBUG: %lu: %s: " f, pthread_self(), __func__, ##a); \
+	fprintf(stdout, "DEBUG: %lu: %s: " f, pthread_self() % 10000, __func__, ##a); \
 	fflush(stdout); \
 	} while(0)
 
 /* die by abort()ing; is exit(-1) better? */
 #define tp_die(f, a...)  do { \
-	fprintf(stderr, "TP: Fatal error (%lu: %s): " f, pthread_self(), __func__, ##a); \
+	fprintf(stderr, "TP: Fatal error (%lu: %s): " f, pthread_self() % 10000, __func__, ##a); \
 	fflush(stderr); \
 	abort(); \
 	} while(0)
 
 #ifdef TP_DEBUG_LOCK
 #define tp_debug_lock(f, a...)  do { \
-	fprintf(stdout, "DEBUG: %lu: %s: " f, pthread_self(), __func__, ##a); \
+	fprintf(stdout, "DEBUG: %lu: %s: " f, pthread_self() % 10000, __func__, ##a); \
 	fflush(stderr); \
 	} while(0)
 #else
@@ -79,21 +79,21 @@
 #define tp_testcase_int(description, expected, actual) do { \
 	fprintf(stdout, "TEST %s: %llu: %s: expected=%d, actual=%d\n", \
 			(expected == actual) ? "PASS" : "FAIL", \
-			(unsigned long long)pthread_self(), description, \
+			(unsigned long long)pthread_self() % 10000, description, \
 			expected, actual); \
 } while(0)
 
 #define tp_testcase_uint(description, expected, actual) do { \
 	fprintf(stdout, "TEST %s: %llu: %s: expected=%u, actual=%u\n", \
 			(expected == actual) ? "PASS" : "FAIL", \
-			(unsigned long long)pthread_self(), description, \
+			(unsigned long long)pthread_self() % 10000, description, \
 			expected, actual); \
 } while(0)
 
 #define tp_testcase_ptr(description, expected, actual) do { \
 	fprintf(stdout, "TEST %s: %llu: %s: expected=%p, actual=%p\n", \
 			(expected == actual) ? "PASS" : "FAIL", \
-			(unsigned long long)pthread_self(), description, \
+			(unsigned long long)pthread_self() % 10000, description, \
 			expected, actual); \
 } while(0)
 

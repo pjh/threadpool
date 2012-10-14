@@ -21,6 +21,8 @@ struct threadpool_ {
 	unsigned int tasks_pending;
 	unsigned int tasks_active;
 	unsigned int tasks_completed;
+	cpu_set_t *cpu_set;
+	int last_cpu_assigned;
 	bool use_nvm;
 };
 
@@ -45,7 +47,7 @@ void task_free_fn(void *arg) {
 }
 
 int threadpool_create(threadpool **tp, unsigned int num_workers,
-		bool use_nvm) {
+		cpu_set_t *cpu_set, bool use_nvm) {
 	int ret;
 	unsigned int i, uret;
 
@@ -88,23 +90,49 @@ int threadpool_create(threadpool **tp, unsigned int num_workers,
 		tp_error("kp_cond_create(exit_cond) returned error=%d\n", ret);
 		goto free_cond1;
 	}
+	if (cpu_set && CPU_COUNT(cpu_set) > 0) {
+		/* Make a copy of cpu_set so that caller can free theirs: */
+		kp_kpalloc((void **)&((*tp)->cpu_set), sizeof(cpu_set_t), use_nvm);
+		if (!((*tp)->cpu_set)) {
+			tp_error("kp_kpalloc((*tp)->cpu_set) failed\n");
+			goto free_cond2;
+		}
+		CPU_ZERO((*tp)->cpu_set);
+		CPU_OR((*tp)->cpu_set, (*tp)->cpu_set, cpu_set);
+		if (CPU_COUNT(cpu_set) != CPU_COUNT((*tp)->cpu_set)) {  //sanity check
+			tp_die("input cpu_set has count %d, but copied cpu_set has count "
+					"%d\n", CPU_COUNT(cpu_set), CPU_COUNT((*tp)->cpu_set));
+		}
+		tp_debug("copied cpu_set, contains %d cores that worker threads will "
+				"be pinned to\n", CPU_COUNT((*tp)->cpu_set));
+	} else {
+		tp_debug("cpu_set is NULL or empty, so worker threads will not be "
+				"pinned to specific cores\n");
+		(*tp)->cpu_set = NULL;
+	}
+	(*tp)->last_cpu_assigned = CPU_SETSIZE;  //should be 1024...
 	(*tp)->worker_exit = false;
 	(*tp)->use_nvm = use_nvm;
 
-	/* Now that allocation is done, add the workers: */
+	/* Now that allocation is done, add the workers. threadpool_add_worker()
+	 * will increment the num_workers count for us:
+	 */
+	(*tp)->num_workers = 0;
 	for (i = 0; i < num_workers; i++) {
 		uret = threadpool_add_worker(*tp);
 		if (uret != i+1) {
 			tp_error("threadpool_add_worker(%u) returned unexpected value "
 					"%u\n", i, uret);
-			for (i--; i >= 0; i--) {
+			for (; ; i--) {
 				/* Don't wait, ignore return value: */
 				threadpool_remove_worker(*tp, false);
+				if (i == 0) {
+					break;
+				}
 			}
-			goto free_cond2;
+			goto free_cpu_set;
 		}
 	}
-	(*tp)->num_workers = num_workers;
 	(*tp)->tasks_pending = 0;
 	(*tp)->tasks_active = 0;
 	(*tp)->tasks_completed = 0;
@@ -113,6 +141,10 @@ int threadpool_create(threadpool **tp, unsigned int num_workers,
 			(*tp)->num_workers);
 	return 0;
 
+free_cpu_set:
+	if ((*tp)->cpu_set) {
+		kp_free((void **)&((*tp)->cpu_set), use_nvm);
+	}
 free_cond2:
 	kp_cond_destroy("exit cond", &((*tp)->exit_cond));
 free_cond1:
@@ -160,6 +192,9 @@ void threadpool_destroy(threadpool *tp, bool wait) {
 			tp->tasks_active, tp->tasks_completed);
 
 	/* Now free everything that we allocated: */
+	if (tp->cpu_set) {
+		kp_free((void **)&(tp->cpu_set), tp->use_nvm);
+	}
 	kp_cond_destroy("exit cond", &(tp->exit_cond));
 	kp_cond_destroy("task_available cond", &(tp->task_available));
 	kp_mutex_destroy("thread pool mutex", &(tp->lock));
@@ -417,21 +452,66 @@ void *threadpool_worker_fn(void *arg) {
  * to being callable by the client.
  */
 unsigned int threadpool_add_worker(threadpool *tp) {
-	int ret;
+	int i, ret;
+	cpu_set_t cpu_set;
+	pthread_attr_t attr;
 	pthread_t new_thread_id;
 
 	if (!tp) {
 		tp_error("got a NULL argument: tp=%p\n", tp);
 		return UINT32_MAX;
 	}
+	ret = pthread_attr_init(&attr);  //init with default values
+	if (ret != 0) {
+		tp_error("pthread_attr_init() returned error=%d\n", ret);
+		return UINT32_MAX;
+	}
+
+	kp_mutex_lock("threadpool add worker", tp->lock);
+
+	/* If a cpu_set was specified when the threadpool was created, then
+	 * set up the pthread_attr structure so that threads are pinned to
+	 * cores in the cpu set in a round-robin fashion. Because we need to
+	 * use and set last_cpu_assigned, we must do this while the tp->lock
+	 * is held.
+	 */
+	if (tp->cpu_set && CPU_COUNT(tp->cpu_set) > 0) {
+		/* Find the next cpu in the cpu_set; this is not so efficient, but
+		 * CPU_SETSIZE should be modest (1024). If cpu_set is non-NULL, then
+		 * there should be at least one CPU in the set, so we won't loop
+		 * forever...
+		 */
+		for (i = tp->last_cpu_assigned + 1; ; i++) {
+			if (i >= CPU_SETSIZE) {
+				i = 0;
+			}
+			if (CPU_ISSET(i, tp->cpu_set)) {
+				CPU_ZERO(&cpu_set);
+				CPU_SET(i, &cpu_set);
+				tp->last_cpu_assigned = i;
+				tp_debug("set cpu_set for this new worker thread to include "
+						"just cpu %d\n", i);
+				break;
+			}
+		}
+		ret = pthread_attr_setaffinity_np(&attr, sizeof(cpu_set_t), &cpu_set);
+		if (ret != 0) {
+			tp_error("pthread_attr_setaffinity_np() returned error=%d\n", ret);
+			kp_mutex_unlock("threadpool add worker", tp->lock);
+			return UINT32_MAX;
+		}
+	} else {
+		tp_debug("cpu_set is NULL, so not pinning new worker thread to any "
+				"particular core\n");
+	}
+
 	tp_debug("adding a worker to threadpool which currently has %u threads\n",
 			tp->num_workers);
 	
-	kp_mutex_lock("threadpool add worker", tp->lock);
-	/* Use default thread attributes. The argument to threadpool_worker_fn
-	 * is a pointer to the threadpool struct itself.
+	/* The argument to threadpool_worker_fn is a pointer to the threadpool
+	 * struct itself.
 	 */
-	ret = pthread_create(&new_thread_id, NULL, threadpool_worker_fn,
+	ret = pthread_create(&new_thread_id, &attr, threadpool_worker_fn,
 			(void *)tp);
 	if (ret != 0) {
 		tp_error("pthread_create() returned error=%d\n", ret);

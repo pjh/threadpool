@@ -6,6 +6,7 @@
 #ifndef THREADPOOL_H__
 #define THREADPOOL_H__
 
+#include <sched.h>
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -14,12 +15,19 @@ struct threadpool_;
 typedef struct threadpool_ threadpool;
 
 /* Allocates and initializes an empty threadpool with num_workers threads
- * in it. The use_nvm argument indicates whether or not this threadpool will
+ * in it. If cpu_set is non-NULL and non-empty, then the threadpool will pin
+ * worker threads to the cores in the cpu_set in a round-robin fashion; see
+ * CPU_SET(3) for more information about setting the cpu set. This function
+ * makes a copy of the cpu_set, so the caller can free theirs after this
+ * function returns.  Pass NULL for cpu_set to allow threads to run on any
+ * core.
+ * The use_nvm argument indicates whether or not this threadpool will
  * be stored in non-volatile memory.
  * Returns: 0 on success, -1 on error. On success, *tp is set to point
  * to the new threadpool.
  */
-int threadpool_create(threadpool **tp, unsigned int num_workers, bool use_nvm);
+int threadpool_create(threadpool **tp, unsigned int num_workers,
+		cpu_set_t *cpu_set, bool use_nvm);
 
 /* Destroys the threadpool. If the wait argument is true, then this function
  * will wait for all worker threads to finish their work before destroying
@@ -65,11 +73,18 @@ unsigned int threadpool_get_task_count_active(threadpool *tp);
 unsigned int threadpool_get_task_count_completed(threadpool *tp);
 #endif
 
-/* Returns: the number of worker threads currently in the thread pool. */
+/* Returns: the number of worker threads currently in the thread pool.
+ *   Note that if the threadpool is being managed by multiple threads,
+ *   the number of workers returned could be out-of-date as soon as it is
+ *   received by the caller!
+ */
 unsigned int threadpool_get_worker_count(threadpool *tp);
 
 /* Creates another worker thread in the thread pool. 
  * Returns: the number of workers in the pool, or UINT32_MAX on error.
+ *   Note that if the threadpool is being managed by multiple threads,
+ *   the number of workers returned could be out-of-date as soon as it is
+ *   received by the caller!
  */
 unsigned int threadpool_add_worker(threadpool *tp);
 
@@ -78,6 +93,9 @@ unsigned int threadpool_add_worker(threadpool *tp);
  * will wait for a thread to finish, or if it will randomly choose a thread
  * to cancel. Use wait = false with caution!
  * Returns: the number of workers in the pool, or UINT32_MAX on error.
+ *   Note that if the threadpool is being managed by multiple threads,
+ *   the number of workers returned could be out-of-date as soon as it is
+ *   received by the caller!
  */
 unsigned int threadpool_remove_worker(threadpool *tp, bool wait);
 

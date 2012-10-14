@@ -11,14 +11,16 @@
 #include "threadpool.h"
 #include "threadpool_macros.h"
 
+#define NUM_CPUS 8
+
 bool use_nvm = true;
 
 void short_task(void *arg) {
-	unsigned int digit, value;
+	unsigned long digit, value;
 	unsigned long long sum;
 
-	value = (unsigned int)arg;  //32-bit on burrard
-	printf("starting short task, value is: %u\n", value);
+	value = (unsigned long)arg;
+	printf("starting short task, value is: %lu\n", value);
 
 	sum = 0;
 	while (true) {
@@ -41,8 +43,8 @@ void long_task(void *arg) {
 	/* One thousand million is one billion, which is approx. one second
 	 * on burrard... so ten seconds is ten thousand million? Actually,
 	 * turns out to be about twice as long as that. */
-	inner = 1000000;
-	outer = 2000;
+	inner = 10000;
+	outer = 200;
 	sum = (unsigned long long)pthread_self();
 	printf("starting long task, initial value: %llu\n", sum);
 
@@ -178,9 +180,19 @@ void test_threadpool(void) {
 	unsigned int uret, pending, active, completed;
 	bool wait = true;
 	threadpool *tp;
+	cpu_set_t cpu_set;
+
+	CPU_ZERO(&cpu_set);
+#if 1
+	int k;
+	for (k = 1; k < CPU_SETSIZE; k *= 2) {
+		CPU_SET(k % NUM_CPUS, &cpu_set);
+		tp_print("added to cpu_set: %d\n", k % NUM_CPUS);
+	}
+#endif
 
 	/* Create and destroy empty threadpool: */
-	ret = threadpool_create(&tp, 0, use_nvm);
+	ret = threadpool_create(&tp, 0, &cpu_set, use_nvm);
 	tp_testcase_int("threadpool create", 0, ret);
 	if (ret != 0) {
 		tp_die("threadpool_create() failed\n");
@@ -191,7 +203,7 @@ void test_threadpool(void) {
 	tp_testcase_int("threadpool destroy empty", 0, 0);
 
 	/* Create empty threadpool, add a worker and destroy: */
-	ret = threadpool_create(&tp, 0, use_nvm);
+	ret = threadpool_create(&tp, 0, &cpu_set, use_nvm);
 	tp_testcase_int("threadpool create", 0, ret);
 	if (ret != 0) {
 		tp_die("threadpool_create() failed\n");
@@ -202,7 +214,7 @@ void test_threadpool(void) {
 	tp_testcase_int("threadpool destroy 1", 0, 0);
 
 	/* Create empty threadpool, add a worker, remove a worker and destroy: */
-	ret = threadpool_create(&tp, 0, use_nvm);
+	ret = threadpool_create(&tp, 0, &cpu_set, use_nvm);
 	tp_testcase_int("threadpool create", 0, ret);
 	if (ret != 0) {
 		tp_die("threadpool_create() failed\n");
@@ -221,7 +233,7 @@ void test_threadpool(void) {
 	tp_testcase_int("threadpool destroy 0", 0, 0);
 
 	/* Two short tasks: */
-	ret = threadpool_create(&tp, 2, use_nvm);
+	ret = threadpool_create(&tp, 2, &cpu_set, use_nvm);
 	tp_testcase_int("threadpool create", 0, ret);
 	if (ret != 0) {
 		tp_die("threadpool_create() failed\n");
@@ -273,7 +285,7 @@ void test_threadpool(void) {
 }
 
 #define INITIAL_THREADS 44
-#define LOOPS 50
+#define LOOPS 5
 #define ADDS_MIN 12
 #define ADDS_MAX 15
 #define SLEEPTIME 5
@@ -282,12 +294,22 @@ void test_threadpool(void) {
 
 void stress_test_threadpool()
 {
-	int i, j, ret;
+	int j, ret;
 	unsigned int total_tasks;
 	unsigned int pending, active, completed;
-	unsigned long tid;
+	unsigned long i;
 	threadpool *tp;
 	long int rand_int;
+	cpu_set_t cpu_set;
+
+	CPU_ZERO(&cpu_set);
+#if 1
+	int k;
+	for (k = 1; k < CPU_SETSIZE; k *= 2) {
+		CPU_SET(k % NUM_CPUS, &cpu_set);
+		tp_print("added to cpu_set: %d\n", k % NUM_CPUS);
+	}
+#endif
 
 	if (ADDS_MAX <= ADDS_MIN) {
 		tp_die("invalid ADDS_MAX %u and ADDS_MIN %u\n", ADDS_MAX,
@@ -295,8 +317,7 @@ void stress_test_threadpool()
 	}
 
 	srandom((unsigned int)time(NULL));
-	tid = pthread_self();
-	ret = threadpool_create(&tp, INITIAL_THREADS, use_nvm);
+	ret = threadpool_create(&tp, INITIAL_THREADS, &cpu_set, use_nvm);
 	if (ret != 0) {
 		tp_die("threadpool_create() failed\n");
 	}
